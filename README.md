@@ -1,7 +1,7 @@
 # 数据驱动的可重复性研究考察细则
 
 - 使用课程中教授的技能，创建一个数据分析、软件开发、研究复现、网站建设等类型的项目（详见项目指南）
-- 3 - 5 人一组共创一个项目，将项目代码移交到课程组织（[2025年春季学期 D2RS](https://github.com/D2RS-2025spring)）`D2RS-2025spring`（使用 transfer 的方法，详见 [转让仓库指南](https://docs.github.com/zh/repositories/creating-and-managing-repositories/transferring-a-repository#transferring-a-repository-owned-by-your-personal-account)）
+- 3 - 5 人一组共创一个项目，将项目代码移交到课程组织（[2025年春季学期 D2RS](https://github.com/D2RS-2025spring)）`D2RS-2025spring`（使用 transfer 的方法，详见 [转让仓库指南](transfer-guide.md)）
 
 
 ## 项目指南

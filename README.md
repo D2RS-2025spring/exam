@@ -1,5 +1,12 @@
 # 数据驱动的可重复性研究考察细则
 
+## Update
+
+- 有同学申请 GitHub Copilot 的访问权限，该服务针对个人用户是免费使用的，设置方法参见 [GitHub Copilot 配置](github-copilot.md)。
+- **特别提醒**：给仓库起一个清晰准确的名字，如网站类可以叫做 `gaoch-lab`，`gaolab-hzau` 等，项目类可以叫 `ForestView` 等，不要使用 `exam`，`finalexam`，`123`，`xyz` 等没有意义（还会重复）的字符。
+
+## 考察形式
+
 - 使用课程中教授的技能，创建一个数据分析、软件开发、研究复现、网站建设等类型的项目（详见项目指南）
 - 3 - 5 人一组共创一个项目，将项目代码移交到课程组织（[2025年春季学期 D2RS](https://github.com/D2RS-2025spring)）`D2RS-2025spring`（使用 transfer 的方法，详见 [转让仓库指南](transfer-guide.md)）
 

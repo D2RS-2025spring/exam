@@ -1,0 +1,212 @@
+# 检查项目提交情况
+
+这是一个 R 脚本，它使用 `gh` R 包来访问指定的 GitHub 组织（`D2RS-2025spring`）指定仓库（`exam`）中的 Issue，获取 ISSUE 中的指向 github 仓库的地址，检查地址是否重定向，重定向后的目标是不是这个组织。如果是这个组织，那么就给他打上一个“确认提交”的标签。如果没有，则添加一个回复，内容为“注意按时提交”。
+
+脚本将执行以下操作：
+
+1.  **获取 Open Issues**：从 `D2RS-2025spring` 组织下的 `exam` 仓库中获取所有处于 "open" 状态的 Issue。
+2.  **提取 GitHub 链接**：在每个 Issue 的正文中查找指向 GitHub 仓库的 URL。
+3.  **检查链接重定向与归属**：
+    * 对于每个找到的 GitHub 链接，检查它是否会重定向。
+    * 获取重定向后的最终 URL。
+    * 判断该最终 URL 是否指向 `D2RS-2025spring` 组织下的一个仓库。
+4.  **执行操作**：
+    * 如果 Issue 中**任何一个** GitHub 链接最终指向 `D2RS-2025spring` 组织内的仓库，则给该 Issue 打上 "确认提交" 的标签。
+    * 否则（即 Issue 中没有 GitHub 链接，或所有链接都不指向该组织，或链接检查失败），则在该 Issue下添加一条评论："注意按时提交"。
+
+
+## R 脚本
+
+```{r}
+# 0. 安装和加载必要的 R 包
+# 如果尚未安装，请取消注释下一行并运行它
+# install.packages(c("gh", "httr", "stringr"))
+
+library(gh)
+library(httr)
+library(stringr)
+
+# --- 1. 配置参数 ---
+ORG_NAME <- "D2RS-2025spring"
+REPO_NAME <- "exam"
+TARGET_LABEL <- "确认提交" # 需要被打上的标签
+COMMENT_TEXT <- "注意按时提交" # 未确认提交时要发表的评论
+# 用于匹配 GitHub 仓库链接并提取组织名和仓库名的正则表达式
+# 例如: https://github.com/owner/repo
+GITHUB_URL_PATTERN <- "https?://(?:www\\.)?github\\.com/([^/\\s]+)/([^/\\s#?]+)"
+
+# --- 2. 主要逻辑 ---
+
+# 2.1 获取指定仓库的 Open Issues
+message(paste0("正在从 ", ORG_NAME, "/", REPO_NAME, " 获取 open状态的 issues..."))
+issues <- tryCatch({
+  gh::gh(
+    "GET /repos/{owner}/{repo}/issues",
+    owner = ORG_NAME,
+    repo = REPO_NAME,
+    state = "open",
+    per_page = 100 # 假设 open issues 不会一次超过100个；如果可能更多，需要处理分页
+    # gh 包会自动使用通过 `gh auth login` 配置的凭证
+  )
+}, error = function(e) {
+  stop("获取 issues 失败: ", e$message)
+})
+
+if (length(issues) == 0) {
+  message("没有找到 open 状态的 issues。")
+  # 如果在非交互式脚本中，可能需要在此处停止
+} else {
+  message(paste0("找到 ", length(issues), " 个 open issues，开始处理..."))
+}
+
+# 2.2 遍历并处理每个 Issue
+for (i in seq_along(issues)) {
+  issue <- issues[[i]] # gh 返回的是一个列表的列表
+  issue_number <- issue$number
+  issue_title <- issue$title
+  issue_body <- issue$body
+
+  message(paste0("\n--- 处理 Issue #", issue_number, ": '", issue_title, "' ---"))
+
+  found_matching_repo_in_issue <- FALSE # 标记是否在该 issue 中找到了指向目标组织的链接
+
+  if (!is.null(issue_body) && nzchar(trimws(issue_body))) {
+    # 从 issue body 中提取所有 GitHub 链接
+    extracted_matches <- stringr::str_match_all(issue_body, GITHUB_URL_PATTERN)[[1]]
+
+    if (nrow(extracted_matches) > 0) {
+      potential_urls <- extracted_matches[, 1] # 完整匹配到的 URL
+      message(paste0("  在 Issue #", issue_number, " 中找到 ", length(potential_urls), " 个潜在的 GitHub URL。"))
+
+      for (url_idx in seq_along(potential_urls)) {
+        original_url <- potential_urls[url_idx]
+        message(paste0("    [", url_idx, "/", length(potential_urls), "] 检查 URL: ", original_url))
+        
+        final_url <- original_url
+        resolved_owner <- NULL
+
+        # 尝试解析 URL 并检查重定向
+        tryCatch({
+          # httr::HEAD 请求，httr 会自动处理重定向
+          # 设置超时以避免长时间等待
+          response <- httr::HEAD(original_url, config = httr::timeout(10))
+          final_url <- response$url # 获取重定向后的最终 URL
+
+          if (final_url != original_url) {
+            message(paste0("      URL 重定向至: ", final_url))
+          } else {
+            message("      URL 没有发生重定向。")
+          }
+
+          # 从最终 URL 中提取 owner
+          final_url_parts <- stringr::str_match(final_url, GITHUB_URL_PATTERN)
+          if (!is.na(final_url_parts[1, 2])) { # 确保 final_url 仍然是 GitHub 仓库链接格式
+            resolved_owner <- final_url_parts[1, 2]
+            message(paste0("      最终 URL 的所有者: ", resolved_owner))
+
+            # 检查所有者是否为目标组织 (忽略大小写)
+            if (tolower(resolved_owner) == tolower(ORG_NAME)) {
+              message("      ✅ 确认! 该链接指向目标组织仓库。")
+              found_matching_repo_in_issue <- TRUE
+              break # 已找到符合条件的链接，无需再检查此 issue 中的其他链接
+            } else {
+              message("      ❌ 该链接不指向目标组织。")
+            }
+          } else {
+            message(paste0("      ⚠️ 最终 URL '", final_url, "' 看上去不是一个标准的 GitHub 仓库链接。"))
+          }
+        }, error = function(e) {
+          message(paste0("      ⚠️ 处理 URL '", original_url, "' 时发生错误: ", e$message))
+          # 出错则认为此 URL 不符合条件，继续检查下一个
+        })
+
+        if (found_matching_repo_in_issue) {
+          break # 如果已找到，跳出内层循环
+        }
+      } # 结束遍历 issue 中的 URLs
+    } else {
+      message(paste0("  Issue #", issue_number, " 的正文中未找到 GitHub 仓库链接。"))
+    }
+  } else {
+    message(paste0("  Issue #", issue_number, " 的正文为空。"))
+  }
+
+  # 2.3 根据检查结果执行操作
+  if (found_matching_repo_in_issue) {
+    message(paste0("  -> 对 Issue #", issue_number, " 添加标签 '", TARGET_LABEL, "'。"))
+    tryCatch({
+      # 为 Issue 添加标签
+      # POST /repos/{owner}/{repo}/issues/{issue_number}/labels 会添加标签，如果标签已存在则GitHub API通常会忽略
+      gh::gh(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/labels",
+        owner = ORG_NAME,
+        repo = REPO_NAME,
+        issue_number = issue_number,
+        labels = list(TARGET_LABEL) # API 期望一个标签名称的列表/数组
+      )
+      message(paste0("     标签 '", TARGET_LABEL, "' 已成功添加至 Issue #", issue_number, "."))
+    }, error = function(e) {
+      message(paste0("     ❌ 添加标签至 Issue #", issue_number, " 失败: ", e$message))
+      message("     请确保标签 '", TARGET_LABEL, "' 已在仓库 ", ORG_NAME, "/", REPO_NAME, " 中存在。")
+    })
+  } else {
+    message(paste0("  -> 对 Issue #", issue_number, " 添加评论 '", COMMENT_TEXT, "'。"))
+    tryCatch({
+      # 为 Issue 添加评论
+      gh::gh(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        owner = ORG_NAME,
+        repo = REPO_NAME,
+        issue_number = issue_number,
+        body = COMMENT_TEXT
+      )
+      message(paste0("     评论已成功添加至 Issue #", issue_number, "."))
+    }, error = function(e) {
+      message(paste0("     ❌ 添加评论至 Issue #", issue_number, " 失败: ", e$message))
+    })
+  }
+}
+
+message("\n--- 脚本执行完毕 ---")
+```
+
+
+## 如何使用
+
+1.  **安装 R 和 R 包**：
+    * 确保您的系统上安装了 R。
+    * 打开 R 或 RStudio 控制台，运行以下命令来安装所需的包（如果尚未安装）：
+        ```R
+        install.packages(c("gh", "httr", "stringr"))
+        ```
+
+2.  **GitHub CLI 认证**：
+    * 此脚本依赖于 `gh` R 包，该包通常使用 GitHub CLI (`gh`) 的认证信息。
+    * 请确保您已安装 GitHub CLI 并且已通过 `gh auth login` 命令登录到您的 GitHub 账户。脚本将使用此认证来代表您执行操作。
+
+3.  **确保标签存在**：
+    * 脚本会尝试为符合条件的 Issue 添加名为 "确认提交" 的标签。请**确保这个标签已经在 `D2RS-2025spring/exam` 仓库中存在**。如果标签不存在，添加标签的操作将会失败。您可以手动在 GitHub 仓库的 "Labels" 页面创建它。
+
+4.  **运行脚本**：
+    * 将上面的 R 脚本代码保存为一个 `.R` 文件（例如 `process_issues.R`）。
+    * 在 R 或 RStudio 控制台中，设置工作目录到脚本所在的文件夹（如果需要），然后运行脚本：
+        ```R
+        source("process_issues.R")
+        ```
+    * 脚本会输出处理过程中的信息，包括正在处理哪个 Issue，找到了哪些 URL，以及执行了什么操作（添加标签或评论）。
+
+5.  **权限**：
+    * 您用于 `gh auth login` 的 GitHub 账户需要对 `D2RS-2025spring/exam` 仓库有足够的权限来读取 Issues、添加标签和发表评论。
+
+
+## 注意事项
+
+* **API 速率限制**：如果您有非常多的 open issues，频繁运行此脚本可能会触发 GitHub API 的速率限制。对于一般的课程仓库，这通常不成问题。
+* **错误处理**：脚本包含了一些基本的错误处理（例如，获取 Issues 失败、URL 解析失败、API 调用失败），但您可以根据需要进一步增强。
+* **超时设置**：检查 URL 重定向时，`httr::HEAD` 函数设置了10秒的超时 (`httr::timeout(10)`)。如果网络状况不佳或目标服务器响应缓慢，您可能需要调整这个值。
+* **Issue 正文的复杂性**：脚本使用正则表达式提取 URL。如果 Issue 正文中的 URL 格式非常奇特或嵌入在复杂的结构中，正则表达式可能需要调整。当前的模式 `https?://(?:www\\.)?github\\.com/([^/\\s]+)/([^/\\s#?]+)` 能够处理常见的 `http://github.com/owner/repo` 或 `https://www.github.com/owner/repo` 形式的链接，并尝试忽略查询参数和哈希片段。
+* **幂等性**：
+    * **添加标签**：如果一个 Issue 已经有了 "确认提交" 标签，再次尝试添加通常不会产生错误或重复标签（GitHub API 会处理）。
+    * **添加评论**：如果脚本多次对同一个不符合条件的 Issue 运行，它会**多次添加** "注意按时提交" 这条评论。如果需要避免重复评论，脚本逻辑会更复杂（例如，需要先获取该 Issue 的所有评论，检查是否已存在相同的评论）。
+
+希望这个脚本能帮助您自动化处理 GitHub Issues！

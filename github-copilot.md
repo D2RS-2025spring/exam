@@ -1,6 +1,6 @@
 ## 开通 GitHub Copilot 服务
 
-GitHub Copilot 是一个“AI 结对程序员”（AI pair programmer）。它利用先进的 AI 模型（由 OpenAI 提供技术支持），在你使用的代码编辑器或 IDE（如 Visual Studio Code, JetBrains IDEs, Neovim, Visual Studio, RStudio 等）中，实时为你提供代码建议。
+GitHub Copilot 是一个“AI 伴侣程序员”（AI pair programmer）。它利用先进的 AI 模型（由 OpenAI 提供技术支持），在你使用的代码编辑器或 IDE（如 Visual Studio Code, JetBrains IDEs, Neovim, Visual Studio, RStudio 等）中，实时为你提供代码建议。
 
 主要作用是：
 

@@ -1,0 +1,116 @@
+# 列出考察项目
+
+> 给我用 R 调用 gh 访问 D2RS-2025spring 组织下面的 exam 仓库中处于 open 状态的 ISSUE。使用 ellmer 调用阿里云 qwen-max 分析 ISSUE 的内容，提取项目名称，参与成员的姓名、学号等信息。
+
+
+
+## R 代码
+
+```{r}
+# 加载必要的库
+library(gh)
+library(ellmer)
+library(jsonlite) # 用于解析 ISSUE 内容（如果是 JSON 格式）或更方便地操作
+
+# 1. 从 GitHub 仓库检索开放的 ISSUE
+print("正在从 D2RS-2025spring/exam 获取开放的 ISSUE...")
+tryCatch({
+  open_issues <- gh::gh(
+    "GET /repos/{owner}/{repo}/issues",
+    owner = "D2RS-2025spring",
+    repo = "exam",
+    state = "open"
+  )
+
+  if (length(open_issues) == 0) {
+    print("未找到开放的 ISSUE。")
+  } else {
+    print(paste("找到", length(open_issues), "个开放的 ISSUE。"))
+
+    # 2. 准备使用 ellmer 和 ChatAnywhere 进行分析
+    # 设置 ChatAnywhere 的 API 密钥和基础 URL
+    api_key <- Sys.getenv("CHATANYWHERE_API_KEY")
+    if (api_key == "") {
+      stop("环境变量 CHATANYWHERE_API_KEY 未设置。")
+    }
+
+    # 假设 ChatAnywhere 使用与 OpenAI 兼容的 API 结构：
+    chatanywhere_base_url <- "https://api.chatanywhere.tech" # 或者正确的端点
+
+    # 初始化一个列表来存储提取的信息
+    extracted_info_list <- list()
+
+    # 3. 分析每一个 ISSUE
+    for (i in seq_along(open_issues)) {
+      issue <- open_issues[[i]]
+      issue_number <- issue$number
+      issue_title <- issue$title
+      issue_body <- issue$body %||% "" # 如果 body 为 NULL，则使用空字符串
+
+      print(paste("正在分析 ISSUE #", issue_number, ": ", issue_title, sep = ""))
+
+      # 构建给 ChatGPT 的提示（prompt）
+      # 你可能需要优化这个提示以获得更好的准确性
+      prompt <- paste0(
+        "请分析以下 GitHub ISSUE 的内容，并提取项目名称、参与成员的姓名及其学号。",
+        "如果某项信息不存在，请注明“未找到”。\n\n",
+        "ISSUE 标题: ", issue_title, "\n\n",
+        "ISSUE 正文:\n", issue_body, "\n\n",
+        "期望的输出格式 (示例):\n",
+        "项目名称: 示例项目\n",
+        "参与成员: \n",
+        "- 学生甲（学号）\n",
+        "- 学生乙（学号）\n"
+      )
+
+      tryCatch({
+        # 配置 ellmer 以使用 ChatAnywhere
+        chat = ellmer::chat_openai(
+          api_key = api_key,
+          base_url = chatanywhere_base_url,
+          system_prompt = "你是一个专业的 GitHub ISSUE 分析助手。",
+          model = "gpt-4o-ca" # 确保此模型标识符对于 ChatAnywhere 是正确的
+        )
+
+        response <- chat$chat(prompt)
+
+        extracted_info_list[[length(extracted_info_list) + 1]] <- list(
+          issue_number = issue_number,
+          issue_title = issue_title,
+          analysis = response
+        )
+
+      }, error = function(e_gpt) {
+        message(paste("使用 ChatGPT 分析 ISSUE #", issue_number, "时出错: ", e_gpt$message))
+        extracted_info_list[[length(extracted_info_list) + 1]] <- list(
+          issue_number = issue_number,
+          issue_title = issue_title,
+          analysis = paste("分析出错:", e_gpt$message)
+        )
+      })
+      # 添加一个小延迟以避免达到 API 速率限制（如果你有很多 ISSUE 的话）
+      Sys.sleep(1)
+    }
+
+    # 4. 输出结果
+    print("------------------------------------")
+    print("从 ISSUE 中提取的信息:")
+    print("------------------------------------")
+    for (info in extracted_info_list) {
+      cat(paste("ISSUE 编号:", info$issue_number, "\n"))
+      cat(paste("ISSUE 标题:", info$issue_title, "\n"))
+      cat("提取详情:\n")
+      cat(info$analysis, "\n\n")
+      cat("------------------------------------\n")
+    }
+
+    # 你可以进一步将 'extracted_info_list' 处理成数据框或保存到文件。
+    df_results <- lapply(extracted_info_list, as_tibble) |> 
+      bind_rows()
+
+  }
+}, error = function(e_gh) {
+  message(paste("从 GitHub 获取 ISSUE 时出错: ", e_gh$message))
+})
+```
+

@@ -1,0 +1,146 @@
+# 邀请 Issue 作者加入组织
+
+使用 R 写一个简单的脚本，邀请 GitHub 组织（`D2RS-2025spring`）指定仓库（`exam`）中的 Issue 的作者加入组织。
+
+---
+
+## 实施思路
+
+`gh` R 包是 GitHub CLI 的 R 语言封装，它允许您直接在 R 中调用 `gh` CLI 的功能，并以更 R 友好的方式处理返回的数据（通常是 JSON ）。
+
+
+## 前提条件
+
+1.  **Git**：版本控制工具。
+2.  **R 和 RStudio**：用于编写和运行 R 脚本。
+3.  **GitHub CLI (`gh`)**：确保您已经安装并配置了 `gh` CLI，并且已经通过 `gh auth login` 进行了身份验证。
+4.  **`gh` R 包**：您需要安装 `gh` R 包。
+
+    ```R
+    install.packages("gh")
+    ```
+
+## 脚本实现
+
+
+```{r}
+# 加载必要的库
+library(gh)
+library(dplyr)
+library(purrr) # 用于函数式编程，例如 map_chr
+
+# --- 配置您的 GitHub 信息 ---
+ORG_NAME <- "D2RS-2025spring"
+REPO_NAME <- "exam"
+# -----------------------------
+
+# 1. 获取仓库中所有 Issue 的作者
+# gh 包会自动解析 JSON 响应为 R 列表或数据框
+get_issue_authors_gh <- function(org, repo) {
+  message(sprintf("正在使用 gh 包获取组织 %s 仓库 %s 的 Issue 作者...", org, repo))
+  
+  # 使用 gh::gh() 函数调用 GitHub API
+  # /repos/:owner/:repo/issues 是获取 Issue 的 API 路径
+  # .send_headers = c(Accept = "application/vnd.github.v3+json") 确保获取 JSON 格式
+  # per_page = 100 提高每页获取的数量，减少请求次数
+  # .limit = Inf 表示获取所有页的数据
+  issues <- gh::gh(
+    "/repos/{owner}/{repo}/issues",
+    owner = org,
+    repo = repo,
+    .send_headers = c(Accept = "application/vnd.github.v3+json"),
+    per_page = 100,
+    .limit = Inf
+  )
+  
+  if (length(issues) == 0) {
+    message("未找到任何 Issue。")
+    return(character(0))
+  }
+  
+  # 提取每个 Issue 的作者登录名
+  authors <- issues %>%
+    map_chr(~ .x$user$login) %>%
+    unique()
+  
+  return(authors)
+}
+
+# 2. 获取组织成员列表
+get_organization_members_gh <- function(org) {
+  message(sprintf("正在使用 gh 包获取组织 %s 的成员列表...", org))
+  
+  members <- gh::gh(
+    "/orgs/{org}/members",
+    org = org,
+    .send_headers = c(Accept = "application/vnd.github.v3+json"),
+    per_page = 100,
+    .limit = Inf
+  )
+  
+  if (length(members) == 0) {
+    message("未找到任何组织成员。")
+    return(character(0))
+  }
+  
+  # 提取每个成员的登录名
+  member_logins <- members %>%
+    map_chr(~ .x$login) %>%
+    unique()
+  
+  return(member_logins)
+}
+
+# 3. 邀请用户加入组织
+invite_user_to_org_gh <- function(org, username) {
+  message(sprintf("正在邀请用户 %s 加入组织 %s...", username, org))
+  
+  tryCatch({
+    gh::gh(
+      "PUT /orgs/{org}/memberships/{username}",
+      org = org,
+      username = username,
+      role = "member", # 设置角色为成员
+      .send_headers = c(Accept = "application/vnd.github.v3+json")
+    )
+    message(sprintf("成功邀请 %s 加入组织 %s。", username, org))
+  }, error = function(e) {
+    warning(sprintf("未能邀请 %s 加入组织 %s。错误信息: %s", username, org, e$message))
+    warning("请检查您的 GitHub 权限（需要组织所有者或管理员权限）或用户是否已是成员。")
+  })
+}
+
+# --- 执行脚本 ---
+
+# 1. 获取所有 Issue 作者
+issue_authors <- get_issue_authors_gh(ORG_NAME, REPO_NAME)
+
+if (length(issue_authors) == 0) {
+  message("没有找到任何 Issue 作者，或者获取失败。脚本结束。")
+} else {
+  message(sprintf("找到以下 Issue 作者: %s", paste(issue_authors, collapse = ", ")))
+  
+  # 2. 获取组织成员
+  org_members <- get_organization_members_gh(ORG_NAME)
+  message(sprintf("当前组织成员: %s", paste(org_members, collapse = ", ")))
+  
+  # 3. 筛选出未在组织内的作者
+  authors_to_invite <- setdiff(issue_authors, org_members)
+  
+  if (length(authors_to_invite) == 0) {
+    message("所有 Issue 作者都已是组织成员。无需邀请。")
+  } else {
+    message(sprintf("需要邀请以下作者加入组织: %s", paste(authors_to_invite, collapse = ", ")))
+    
+    # 4. 邀请这些作者
+    for (author in authors_to_invite) {
+      invite_user_to_org_gh(ORG_NAME, author)
+      Sys.sleep(1) # 稍作延迟，避免请求频率过高
+    }
+    message("邀请过程完成。")
+  }
+}
+
+message("脚本运行结束。")
+```
+

@@ -1,0 +1,682 @@
+# 部署项目
+
+在 `D2RS-2025spring` 组织下面的 `exam` 的 ISSUE 中，注册了很多项目。这些项目都位于 `D2RS-2025spring` 这个 GitHub 组织里面，项目的仓库链接可从 ISSUE 内容中获取。我现在需要将这些已经完成的项目部署到本地的服务器上。这些项目中最多的是静态网站，其次是数据分析和复现，再次是机器学习或深度学习应用程序等。
+
+- 对于静态网站，使用 `nginx` 进行部署。
+- 对于数据分析和复现，需要为每个项目创建独立的虚拟环境（通常是 Python 或者 R 环境），并安装项目所需的依赖。并将项目运行的结果使用 Quarto 进行展示。
+- 对于机器学习或深度学习应用程序，同样需要创建独立的虚拟环境，并安装项目所需的依赖。然后为程序配置 `nginx` 反向代理，将程序的 API 接口暴露出来。
+
+下面使用 R 语言代码来批量实现这些部署任务。
+
+---
+
+您提出的需求非常宏大，涉及从 GitHub Issue 解析、项目克隆、环境配置到多种应用类型的自动化部署和服务配置。这是一个典型的 DevOps 工作流程，用 R 语言来实现这样一套完整的系统会相当复杂，并且 R 通常不被视作此类服务器编排任务的首选工具（像 Ansible、Docker、Shell 脚本等更为常见）。
+
+然而，根据您的要求，我将尽力提供一个 R 脚本的框架和思路。这个脚本将作为**高级协调器**，调用系统命令来执行大部分实际工作。**请注意，这更像是一个概念验证和结构指南，而非一个可以直接在生产环境中运行的完美解决方案。** 您需要根据您的具体服务器环境、项目结构约定以及安全策略进行大量的定制和完善。
+
+**核心挑战与假设：**
+
+1.  **项目类型识别**：脚本如何知道一个仓库是静态网站、数据分析项目还是机器学习应用？
+    * **本方案假设**：通过检查仓库中是否存在特定文件（例如 `index.html`, `_quarto.yml`, `requirements.txt` 配合 `app.py` 等）来进行启发式判断。更可靠的方式可能是在 Issue 中使用特定标签，或者在仓库中包含一个元数据文件（例如 `.project_type`）。
+2.  **环境隔离**：为每个项目创建独立的 Python/R 环境。
+    * **本方案假设**：Python 项目使用 `venv` 和 `requirements.txt`。R 项目使用 `renv` 和 `renv.lock`（如果存在）。
+3.  **服务器环境**：
+    * **本方案假设**：脚本运行在目标部署服务器上。
+    * 服务器已安装必要的软件：`git`, `nginx`, `python3` (及 `venv` 模块), `R` (及 `renv` 包), `quarto` CLI。
+    * 运行脚本的用户具有执行相关操作的权限（克隆仓库、创建目录、写入 Nginx 配置、重启 Nginx 服务——可能需要 `sudo`）。脚本中会指明哪些地方可能需要 `sudo`。
+4.  **Nginx 配置**：动态生成和管理 Nginx 配置文件。
+    * **本方案假设**：脚本会生成 Nginx 服务器块的配置文件字符串，并将其写入指定的 Nginx 配置目录（例如 `/etc/nginx/sites-available/`），然后尝试创建符号链接并重新加载 Nginx。端口分配将基于一个起始端口递增。
+5.  **应用启动**：
+    * 数据分析项目通过 Quarto 渲染。
+    * 机器学习应用需要一个标准化的启动方式（例如一个 `run_app.sh` 脚本，或者一个已知的 Python 应用服务器命令如 `gunicorn` / `uvicorn`）。脚本中会假设一个简单的后台启动方式。对于生产环境，强烈建议使用 `systemd` 服务。
+6.  **安全性**：从 GitHub 仓库拉取代码并执行其中的指令（例如安装依赖）存在安全风险。请确保您信任 `D2RS-2025spring` 组织下的所有项目代码。
+
+---
+
+## R 脚本框架
+
+```R
+# --- 0. 加载和准备 ---
+# install.packages(c("gh", "stringr", "purrr", "glue", "processx")) # 如果需要
+library(gh)
+library(stringr)
+library(purrr)
+library(glue)
+library(processx) # 用于更精细地控制外部进程
+
+# --- 1. 全局配置 ---
+# GitHub 相关
+ORG_NAME <- "D2RS-2025spring"
+EXAM_REPO_NAME <- "exam" # 存放 Issues 的仓库
+GITHUB_TOKEN <- Sys.getenv("GITHUB_PAT") # 建议使用环境变量存储 PAT
+
+# 本地服务器部署路径
+BASE_DEPLOY_PATH <- "/srv/deployments" # 所有项目将部署到此目录下
+NGINX_SITES_AVAILABLE <- "/etc/nginx/sites-available"
+NGINX_SITES_ENABLED <- "/etc/nginx/sites-enabled"
+
+# 起始端口号 (用于 Nginx 监听和应用内部端口)
+# 确保这些端口未被占用，并且防火墙允许访问
+NEXT_AVAILABLE_EXT_PORT <- 8080 # Nginx 对外暴露的起始端口
+NEXT_AVAILABLE_INT_PORT <- 5000 # ML/DL 应用内部监听的起始端口
+
+# 日志文件
+LOG_FILE <- file.path(BASE_DEPLOY_PATH, "deployment_log.txt")
+
+# --- Helper: 日志记录函数 ---
+log_message <- function(..., level = "INFO") {
+  msg <- paste0(Sys.time(), " [", level, "] ", paste0(...))
+  print(msg)
+  tryCatch(cat(paste0(msg, "\n"), file = LOG_FILE, append = TRUE),
+           error = function(e) warning("无法写入日志文件!"))
+}
+
+# --- Helper: 执行系统命令 ---
+# 改进的 system() 版本，使用 processx
+execute_command <- function(command, args = c(), workdir = NULL, sudo = FALSE, desc = "") {
+  full_cmd_str <- paste(c(if(sudo) "sudo" else "", command, args), collapse = " ")
+  log_message(desc, " CMD: ", full_cmd_str, if(!is.null(workdir)) paste0(" (in ", workdir, ")") else "")
+
+  # 如果需要在特定工作目录执行
+  old_wd <- NULL
+  if (!is.null(workdir) && dir.exists(workdir)) {
+    old_wd <- getwd()
+    setwd(workdir)
+    on.exit(setwd(old_wd), add = TRUE)
+  }
+
+  tryCatch({
+    if (sudo) { # processx 对 sudo 的直接支持不如直接拼接命令字符串简单
+      res <- processx::run("sudo", args = c(command, args), error_on_status = FALSE)
+    } else {
+      res <- processx::run(command, args = args, error_on_status = FALSE)
+    }
+
+    if (res$status == 0) {
+      log_message(desc, " 成功. Output:\n", res$stdout)
+      return(list(status = 0, stdout = res$stdout, stderr = res$stderr))
+    } else {
+      log_message(desc, " 失败! Status: ", res$status, ". Error:\n", res$stderr, "\nOutput:\n", res$stdout, level = "ERROR")
+      return(list(status = res$status, stdout = res$stdout, stderr = res$stderr))
+    }
+  }, error = function(e) {
+    log_message(desc, " 执行命令时发生严重错误: ", e$message, level = "ERROR")
+    return(list(status = -1, stdout = "", stderr = e$message))
+  })
+}
+
+
+# --- 2. GitHub Issue 和仓库处理 ---
+
+# 2.1 获取 Issues 并提取有效仓库 URL
+get_project_repos_from_issues <- function() {
+  log_message("开始从 ", ORG_NAME, "/", EXAM_REPO_NAME, " 获取 open issues...")
+  repo_urls <- c()
+  tryCatch({
+    issues <- gh::gh(
+      "GET /repos/{owner}/{repo}/issues",
+      owner = ORG_NAME,
+      repo = EXAM_REPO_NAME,
+      state = "open",
+      per_page = 100,
+      .token = GITHUB_TOKEN
+    )
+
+    if (length(issues) == 0) {
+      log_message("没有找到 open issues.")
+      return(repo_urls)
+    }
+
+    log_message("找到 ", length(issues), " 个 open issues.")
+    for (issue in issues) {
+      if (!is.null(issue$body) && nzchar(issue$body)) {
+        # 提取 GitHub URL (https://github.com/org/repo)
+        # 此处的 GITHUB_URL_PATTERN 应该与前一个脚本的类似
+        pattern <- "https?://(?:www\\.)?github\\.com/([^/\\s]+)/([^/\\s#?]+)"
+        matches <- stringr::str_match_all(issue$body, pattern)[[1]]
+        if (nrow(matches) > 0) {
+          for (i in 1:nrow(matches)) {
+            url_owner <- matches[i, 2]
+            url_repo_name <- matches[i, 3]
+            # 确保是本组织下的仓库
+            if (tolower(url_owner) == tolower(ORG_NAME)) {
+              full_url <- matches[i, 1]
+              # 移除 .git 后缀（如果存在）
+              full_url <- sub("\\.git$", "", full_url)
+              if (!(full_url %in% repo_urls)) {
+                 repo_urls <- c(repo_urls, full_url)
+                 log_message("从 Issue #", issue$number, " 找到有效项目仓库: ", full_url)
+              }
+            }
+          }
+        }
+      }
+    }
+  }, error = function(e) {
+    log_message("获取或解析 issues 失败: ", e$message, level = "ERROR")
+  })
+  return(unique(repo_urls))
+}
+
+# 2.2 克隆或更新仓库
+clone_or_update_repo <- function(repo_url, project_name) {
+  project_path <- file.path(BASE_DEPLOY_PATH, project_name)
+  if (dir.exists(project_path)) {
+    log_message("项目 ", project_name, " 已存在, 尝试更新...")
+    execute_command("git", c("pull"), workdir = project_path, desc = paste("更新", project_name))
+  } else {
+    log_message("项目 ", project_name, " 不存在, 开始克隆...")
+    dir.create(project_path, recursive = TRUE, showWarnings = FALSE)
+    # 使用 PAT 进行克隆，如果仓库是私有的
+    # repo_url_with_pat <- str_replace(repo_url, "https://github.com/", glue("https://x-access-token:{GITHUB_TOKEN}@github.com/"))
+    # 为简单起见，这里假设 gh CLI 或 git credential helper 已配置
+    execute_command("git", c("clone", repo_url, project_path), desc = paste("克隆", project_name))
+  }
+  return(project_path)
+}
+
+# --- 3. 项目类型检测与部署逻辑 ---
+
+# 3.1 检测项目类型 (启发式)
+detect_project_type <- function(project_path) {
+  # 优先检查 .project_type 文件 (如果约定使用)
+  project_type_file <- file.path(project_path, ".project_type")
+  if (file.exists(project_type_file)) {
+    type <- tolower(trimws(readLines(project_type_file, n = 1, warn = FALSE)[1]))
+    if (type %in% c("static", "data_analysis_py", "data_analysis_r", "ml_dl_app")) {
+      log_message("在 ", project_path, " 中通过 .project_type 文件检测到类型: ", type)
+      return(type)
+    }
+  }
+
+  # 启发式规则
+  if (file.exists(file.path(project_path, "_quarto.yml")) || length(list.files(project_path, pattern = "\\.qmd$", recursive = TRUE)) > 0) {
+    log_message("在 ", project_path, " 中检测到 Quarto 文件, 类型: data_analysis (Quarto)")
+    # 需要进一步区分是 R 还是 Python 后端
+    if (file.exists(file.path(project_path, "renv.lock"))) return("data_analysis_r_quarto")
+    if (file.exists(file.path(project_path, "requirements.txt"))) return("data_analysis_py_quarto")
+    return("data_analysis_quarto_generic") # 如果无法确定后端
+  }
+  if (file.exists(file.path(project_path, "requirements.txt")) &&
+      (file.exists(file.path(project_path, "app.py")) || file.exists(file.path(project_path, "main.py")) || # 常见ML应用入口
+       any(map_lgl(c("flask", "fastapi", "streamlit", "gunicorn", "uvicorn"), ~ any(grepl(.x, readLines(file.path(project_path,"requirements.txt"), warn=FALSE))))))) {
+    log_message("在 ", project_path, " 中检测到 Python 应用文件, 类型: ml_dl_app")
+    return("ml_dl_app")
+  }
+  if (file.exists(file.path(project_path, "renv.lock")) && length(list.files(project_path, pattern = "\\.R$", recursive = TRUE)) > 0) {
+    log_message("在 ", project_path, " 中检测到 R (renv) 项目, 类型: data_analysis_r")
+    return("data_analysis_r")
+  }
+   if (file.exists(file.path(project_path, "requirements.txt")) && length(list.files(project_path, pattern = "\\.py$", recursive = TRUE)) > 0) {
+    log_message("在 ", project_path, " 中检测到 Python (requirements.txt) 项目, 类型: data_analysis_py")
+    return("data_analysis_py")
+  }
+  if (file.exists(file.path(project_path, "index.html")) ||
+      dir.exists(file.path(project_path, "_site")) || # Common for Jekyll/Quarto static
+      dir.exists(file.path(project_path, "public")) || # Common for Hugo/Next.js
+      dir.exists(file.path(project_path, "build"))) { # Common for React/Vue
+    log_message("在 ", project_path, " 中检测到静态文件, 类型: static")
+    return("static")
+  }
+  log_message("无法确定项目类型: ", project_path, level = "WARN")
+  return("unknown")
+}
+
+# 3.2 Nginx 配置生成与应用 (通用部分)
+write_nginx_config <- function(project_name, config_content, use_sudo = TRUE) {
+  conf_file_name <- paste0(project_name, ".conf")
+  conf_path_available <- file.path(NGINX_SITES_AVAILABLE, conf_file_name)
+  conf_path_enabled <- file.path(NGINX_SITES_ENABLED, conf_file_name)
+
+  log_message("为 ", project_name, " 写入 Nginx 配置到 ", conf_path_available)
+  tryCatch({
+    # 使用 sudo 写入, 因为 NGINX_SITES_AVAILABLE 通常需要 root 权限
+    # R 本身无法直接 sudo write. 一个常见模式是 R 生成文件到临时位置，然后用 sudo mv
+    # 这里简化为：如果 use_sudo，则生成需要手动执行的命令，或假设可以配置无密码 sudo echo
+    temp_conf_file <- tempfile(fileext = ".conf")
+    writeLines(config_content, temp_conf_file)
+    
+    # 使用 sudo cp
+    cp_result <- execute_command("cp", c(temp_conf_file, conf_path_available), sudo = use_sudo, desc = paste("复制Nginx配置", project_name))
+    unlink(temp_conf_file) # 删除临时文件
+    
+    if (cp_result$status != 0) {
+      log_message("写入Nginx配置文件 ", conf_path_available, " 失败 (sudo cp).", level = "ERROR")
+      return(FALSE)
+    }
+
+  }, error = function(e) {
+    log_message("写入 Nginx 配置 ", conf_path_available, " 发生错误: ", e$message, level = "ERROR")
+    return(FALSE)
+  })
+  
+  # 创建符号链接
+  if (file.exists(conf_path_available) && !file.exists(conf_path_enabled)) {
+    log_message("为 ", project_name, " 创建 Nginx 符号链接 ", conf_path_enabled)
+    # sudo ln -s source target
+    ln_result <- execute_command("ln", c("-s", conf_path_available, conf_path_enabled), sudo = use_sudo, desc = paste("创建Nginx符号链接", project_name))
+    if (ln_result$status != 0) {
+      log_message("创建Nginx符号链接 ", conf_path_enabled, " 失败 (sudo ln).", level = "ERROR")
+      # return(FALSE) # 即使链接失败，也可能只是已存在或权限问题，不一定终止流程
+    }
+  } else if (file.exists(conf_path_enabled)){
+      log_message("Nginx符号链接 ", conf_path_enabled, " 已存在.")
+  } else {
+      log_message("Nginx配置文件 ", conf_path_available, " 不存在，无法创建符号链接.", level = "WARN")
+  }
+  return(TRUE)
+}
+
+reload_nginx <- function(use_sudo = TRUE) {
+  log_message("重新加载 Nginx 配置...")
+  # sudo nginx -t (测试配置)
+  test_result <- execute_command("nginx", c("-t"), sudo = use_sudo, desc = "测试Nginx配置")
+  if (test_result$status == 0) {
+    # sudo systemctl reload nginx 或 sudo nginx -s reload
+    reload_result <- execute_command("nginx", c("-s", "reload"), sudo = use_sudo, desc = "重载Nginx")
+    if (reload_result$status == 0) {
+      log_message("Nginx 重载成功.")
+      return(TRUE)
+    } else {
+      log_message("Nginx 重载失败.", level = "ERROR")
+      return(FALSE)
+    }
+  } else {
+    log_message("Nginx 配置测试失败. 请检查配置.", level = "ERROR")
+    return(FALSE)
+  }
+}
+
+# 3.3 部署静态网站
+deploy_static_site <- function(project_name, project_path, port) {
+  log_message("开始部署静态网站: ", project_name)
+  # 确定静态文件根目录 (可能需要更智能的检测)
+  static_root <- project_path
+  potential_roots <- c(project_path, # 如果根目录就是
+                       file.path(project_path, "public"),
+                       file.path(project_path, "_site"),
+                       file.path(project_path, "build"),
+                       file.path(project_path, "dist"))
+  
+  actual_root <- NULL
+  for (pr in potential_roots) {
+    if (dir.exists(pr) && file.exists(file.path(pr, "index.html"))) {
+      actual_root <- pr
+      break
+    }
+  }
+  if (is.null(actual_root)) {
+     # 如果项目本身就是静态文件且index.html在根目录
+    if (file.exists(file.path(project_path, "index.html"))) {
+        actual_root <- project_path
+    } else {
+        log_message("在 ", project_path, " 中找不到有效的静态文件根目录 (如 index.html 所在目录).", level = "ERROR")
+        return(FALSE)
+    }
+  }
+  log_message("静态文件根目录确定为: ", actual_root)
+
+  nginx_conf <- glue::glue(
+    "server {{\n",
+    "    listen {port};\n",
+    "    server_name {project_name}.local; # 或者您的域名\n",
+    "    root {actual_root};\n",
+    "    index index.html index.htm;\n",
+    "    location / {{\n",
+    "        try_files $uri $uri/ =404;\n",
+    "    }}\n",
+    "    # 可选: 添加访问和错误日志\n",
+    "    access_log /var/log/nginx/{project_name}.access.log;\n",
+    "    error_log /var/log/nginx/{project_name}.error.log;\n",
+    "}}"
+  )
+  if (write_nginx_config(project_name, nginx_conf)) {
+    log_message("静态网站 ", project_name, " Nginx 配置完成，将监听在端口 ", port)
+    return(TRUE)
+  }
+  return(FALSE)
+}
+
+
+# 3.4 部署数据分析项目 (Python/R + Quarto)
+# 3.4.1 创建 Python 虚拟环境并安装依赖
+setup_python_env <- function(project_path, project_name) {
+  venv_path <- file.path(project_path, ".venv")
+  req_file <- file.path(project_path, "requirements.txt")
+
+  if (!file.exists(req_file)) {
+    log_message("项目 ", project_name, " 在 ", project_path, " 中没有找到 requirements.txt, 跳过 Python 环境设置.", level = "WARN")
+    return(NULL) # 或 TRUE 如果允许没有依赖
+  }
+  
+  # 使用项目特定的Python解释器（如果需要，例如pyenv）
+  # python_exe <- "python3" # 根据系统配置
+  python_exe <- Sys.which("python3") #尝试找到python3
+  if (python_exe == "") python_exe <- Sys.which("python") # 尝试python
+
+  if (!dir.exists(venv_path)) {
+    log_message("为 ", project_name, " 创建 Python 虚拟环境: ", venv_path)
+    execute_command(python_exe, c("-m", "venv", venv_path), workdir = project_path, desc = paste("创建venv", project_name))
+  } else {
+    log_message("Python 虚拟环境 ", venv_path, " 已存在.")
+  }
+  
+  pip_exe <- file.path(venv_path, "bin", "pip")
+  if (!file.exists(pip_exe)) {
+      log_message("pip 在 ", pip_exe, " 中未找到！请检查venv创建是否成功。", level="ERROR")
+      return(NULL)
+  }
+
+  log_message("为 ", project_name, " 安装 Python 依赖...")
+  install_res <- execute_command(pip_exe, c("install", "-r", req_file), workdir = project_path, desc = paste("安装Python依赖", project_name))
+  
+  if(install_res$status == 0) return(venv_path) else return(NULL)
+}
+
+# 3.4.2 创建 R 环境并安装依赖 (使用 renv)
+setup_r_env <- function(project_path, project_name) {
+  renv_lock_file <- file.path(project_path, "renv.lock")
+  if (!file.exists(renv_lock_file)) {
+    log_message("项目 ", project_name, " 在 ", project_path, " 中没有找到 renv.lock, 跳过 R 环境设置.", level = "INFO")
+    # 如果没有 renv.lock，也可以尝试查找 DESCRIPTION 文件或一个约定的依赖列表文件
+    return(TRUE) # 假设可以继续
+  }
+  
+  log_message("为 ", project_name, " 使用 renv 恢复 R 环境...")
+  # Rscript -e "setwd('/path/to/project'); renv::restore()"
+  # 注意：renv::restore() 可能会有交互式提示，需要配置 RENV_CONFIG_REPOS_OVERRIDE
+  # 或者在执行前设置 options(renv.consent = TRUE)
+  r_command <- glue::glue("options(renv.consent = TRUE); renv::restore(project='{project_path}')")
+  execute_command("Rscript", c("-e", r_command), workdir = project_path, desc = paste("恢复R环境", project_name))
+  # renv::restore()的成功与否判断比较复杂，这里简化
+  return(TRUE)
+}
+
+# 3.4.3 运行 Quarto 并通过 Nginx 服务
+deploy_data_analysis_quarto <- function(project_name, project_path, port, project_type) {
+  log_message("开始部署数据分析 (Quarto) 项目: ", project_name)
+
+  # 1. 设置环境
+  if (project_type == "data_analysis_py_quarto" || project_type == "data_analysis_quarto_generic") {
+     if (file.exists(file.path(project_path, "requirements.txt"))) {
+        py_env_path <- setup_python_env(project_path, project_name)
+        if (is.null(py_env_path)) {
+            log_message("Python环境设置失败 for ", project_name, level = "ERROR")
+            # return(FALSE) # 决定是否终止
+        }
+     }
+  }
+  if (project_type == "data_analysis_r_quarto" || project_type == "data_analysis_quarto_generic") {
+     if (file.exists(file.path(project_path, "renv.lock"))) {
+        setup_r_env(project_path, project_name)
+        # R 环境设置成功与否判断简化
+     }
+  }
+  
+  # 2. 渲染 Quarto 项目
+  # quarto_exe <- "/opt/quarto/bin/quarto" # 或者确保 quarto 在 PATH 中
+  quarto_exe <- Sys.which("quarto")
+  if (quarto_exe == "") {
+      log_message("Quarto CLI 未找到! 请安装并确保在 PATH 中。", level="ERROR")
+      return(FALSE)
+  }
+
+  # 确定输出目录，Quarto 默认是 _site
+  output_dir_name <- "_site" # Quarto 默认
+  # 可以通过读取 _quarto.yml project: output-dir: 来获取自定义输出目录
+  # ... (此处省略解析 _quarto.yml 的复杂逻辑)
+  quarto_output_path <- file.path(project_path, output_dir_name)
+  
+  log_message("为 ", project_name, " 渲染 Quarto 项目...")
+  # 需要在项目目录中运行 quarto render
+  # 如果Python/R环境被激活，Quarto应该能找到正确的内核
+  # 可能需要传递 QUARTO_PYTHON 或 QUARTO_R 给 execute_command 的 env 参数
+  render_res <- execute_command(quarto_exe, c("render", "."), workdir = project_path, desc = paste("渲染Quarto", project_name))
+
+  if (render_res$status != 0) {
+      log_message("Quarto 渲染失败 for ", project_name, level = "ERROR")
+      return(FALSE)
+  }
+
+  if (!dir.exists(quarto_output_path) || !file.exists(file.path(quarto_output_path, "index.html"))) {
+    log_message("Quarto 输出目录 ", quarto_output_path, " 未找到或不含 index.html.", level = "ERROR")
+    return(FALSE)
+  }
+
+  # 3. 使用 Nginx 服务 Quarto 输出 (类似静态网站)
+  log_message("为 ", project_name, " (Quarto 输出) 配置 Nginx...")
+  nginx_conf <- glue::glue(
+    "server {{\n",
+    "    listen {port};\n",
+    "    server_name {project_name}.quarto.local;\n",
+    "    root {quarto_output_path};\n",
+    "    index index.html index.htm;\n",
+    "    location / {{\n",
+    "        try_files $uri $uri/ =404;\n",
+    "    }}\n",
+    "    access_log /var/log/nginx/{project_name}.quarto.access.log;\n",
+    "    error_log /var/log/nginx/{project_name}.quarto.error.log;\n",
+    "}}"
+  )
+  if (write_nginx_config(paste0(project_name, "-quarto"), nginx_conf)) {
+    log_message("数据分析项目 ", project_name, " Quarto 输出 Nginx 配置完成，将监听在端口 ", port)
+    return(TRUE)
+  }
+  return(FALSE)
+}
+
+
+# 3.5 部署机器学习/深度学习应用
+deploy_ml_dl_app <- function(project_name, project_path, external_port, internal_app_port) {
+  log_message("开始部署 ML/DL 应用: ", project_name)
+
+  # 1. 设置 Python 环境 (ML/DL 通常是 Python)
+  venv_path <- setup_python_env(project_path, project_name)
+  if (is.null(venv_path)) {
+    log_message("ML/DL 应用 ", project_name, " Python 环境设置失败.", level = "ERROR")
+    return(FALSE)
+  }
+  python_exe_in_venv <- file.path(venv_path, "bin", "python")
+  
+  # 2. 启动应用 (这是最复杂和最不标准化的部分)
+  # 假设: 项目中有一个 run_app.sh 脚本，或者一个 app.py 可以用 gunicorn/uvicorn 启动
+  # 生产环境应使用 systemd 服务文件来管理应用进程
+  # 此处简化为后台启动，并假设应用在 internal_app_port 上监听
+  
+  # 示例：尝试查找并执行 run_app.sh
+  run_script_path <- file.path(project_path, "run_app.sh")
+  if (file.exists(run_script_path)) {
+    log_message("找到 run_app.sh, 尝试执行 ", project_name)
+    # 确保脚本有执行权限
+    execute_command("chmod", c("+x", run_script_path), workdir = project_path, desc = paste("赋予执行权限", project_name))
+    # 后台执行: nohup ./run_app.sh > app.log 2>&1 &
+    # processx 可以启动后台进程，但管理起来复杂
+    # 为了简单，这里仅记录命令，实际执行可能需要更健壮的方式
+    # 需要确保 run_app.sh 内部使用 venv 中的 python，或者在这里激活 venv
+    # e.g., command <- glue::glue("source {file.path(venv_path, 'bin/activate')} && ./run_app.sh") # 复杂
+    log_message("TODO: 执行应用启动脚本 ", run_script_path, " (确保它在端口 ", internal_app_port, " 监听).")
+    # execute_command(run_script_path, c(), workdir = project_path, desc = paste("启动ML应用（脚本）", project_name))
+    # 这通常会阻塞，除非脚本自己处理后台。
+    # 实际应用中：生成 systemd service file, 然后 sudo systemctl start project_name.service
+
+  } else if (file.exists(file.path(project_path, "app.py"))) { # 假设 gunicorn
+    log_message("找到 app.py, 尝试使用 gunicorn 启动 ", project_name)
+    gunicorn_exe <- file.path(venv_path, "bin", "gunicorn")
+    if (!file.exists(gunicorn_exe)) {
+        log_message("gunicorn 未在 venv 中找到，请确保已安装 (e.g. in requirements.txt)", level="ERROR")
+        # 尝试安装gunicorn
+        # execute_command(file.path(venv_path, "bin", "pip"), c("install", "gunicorn"))
+        # gunicorn_exe <- file.path(venv_path, "bin", "gunicorn") # recheck
+    }
+    # gunicorn -w 4 -b 0.0.0.0:internal_app_port app:app --daemon
+    # command_args <- c("-w", "2", # worker 数量
+    #                  "-b", paste0("0.0.0.0:", internal_app_port),
+    #                  "app:app", # 假设 Flask app 实例在 app.py 中叫 app
+    #                  "--daemon") # 后台运行
+    # execute_command(gunicorn_exe, command_args, workdir = project_path, desc = paste("启动ML应用（gunicorn）", project_name))
+    log_message("TODO: 使用 gunicorn 启动 app.py 在端口 ", internal_app_port, " (确保 gunicorn 已安装).")
+    log_message("示例: ", gunicorn_exe, " -w 2 -b 0.0.0.0:", internal_app_port, " app:app --daemon (在 ", project_path, " 运行)")
+
+  } else {
+    log_message("在 ", project_name, " 中未找到明确的应用启动方式 (如 run_app.sh 或 app.py).", level = "ERROR")
+    return(FALSE)
+  }
+  
+  # 假设应用已在 internal_app_port 启动并监听... (这是一个很大的假设)
+  
+  # 3. 配置 Nginx 反向代理
+  log_message("为 ML/DL 应用 ", project_name, " 配置 Nginx 反向代理 (外部:", external_port, " -> 内部:", internal_app_port,")")
+  nginx_conf <- glue::glue(
+    "server {{\n",
+    "    listen {external_port};\n",
+    "    server_name {project_name}.ml.local;\n\n",
+    "    location / {{\n",
+    "        proxy_pass http://localhost:{internal_app_port};\n",
+    "        proxy_set_header Host $host;\n",
+    "        proxy_set_header X-Real-IP $remote_addr;\n",
+    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n",
+    "        proxy_set_header X-Forwarded-Proto $scheme;\n",
+    "        proxy_http_version 1.1;\n", # WebSocket support
+    "        proxy_set_header Upgrade $http_upgrade;\n", # WebSocket support
+    "        proxy_set_header Connection \"upgrade\";\n", # WebSocket support
+    "    }}\n",
+    "    access_log /var/log/nginx/{project_name}.ml.access.log;\n",
+    "    error_log /var/log/nginx/{project_name}.ml.error.log;\n",
+    "}}"
+  )
+  if (write_nginx_config(paste0(project_name, "-ml"), nginx_conf)) {
+    log_message("ML/DL 应用 ", project_name, " Nginx 配置完成，将监听在端口 ", external_port)
+    return(TRUE)
+  }
+  return(FALSE)
+}
+
+
+# --- 4. 主部署流程 ---
+main_deployment_script <- function() {
+  # 初始化日志文件
+  if(file.exists(LOG_FILE)) file.remove(LOG_FILE) # 清空旧日志
+  dir.create(dirname(LOG_FILE), showWarnings = FALSE, recursive = TRUE)
+  
+  log_message("--- 开始批量部署任务 ---")
+  
+  # 确保基础部署目录存在
+  if (!dir.exists(BASE_DEPLOY_PATH)) {
+    dir.create(BASE_DEPLOY_PATH, recursive = TRUE, showWarnings = FALSE)
+    log_message("创建基础部署目录: ", BASE_DEPLOY_PATH)
+  }
+
+  project_repo_urls <- get_project_repos_from_issues()
+  
+  if (length(project_repo_urls) == 0) {
+    log_message("没有找到需要部署的项目仓库。结束。")
+    return()
+  }
+
+  needs_nginx_reload <- FALSE
+  deployed_projects_count <- 0
+
+  # 使用全局变量来分配端口，或者将其作为参数传递和返回值
+  current_ext_port <- NEXT_AVAILABLE_EXT_PORT
+  current_int_port <- NEXT_AVAILABLE_INT_PORT
+
+  for (repo_url in project_repo_urls) {
+    project_name <- basename(repo_url) # 从 URL 获取项目名
+    log_message("\n--- 开始处理项目: ", project_name, " (", repo_url, ") ---")
+    
+    project_path <- clone_or_update_repo(repo_url, project_name)
+    if (!dir.exists(project_path)) {
+      log_message("克隆/更新项目 ", project_name, " 失败, 跳过此项目.", level = "ERROR")
+      next
+    }
+    
+    project_type <- detect_project_type(project_path)
+    log_message("项目 ", project_name, " 检测到的类型为: ", project_type)
+    
+    success <- FALSE
+    if (project_type == "static") {
+      success <- deploy_static_site(project_name, project_path, current_ext_port)
+      if (success) current_ext_port <- current_ext_port + 1
+    } else if (startsWith(project_type, "data_analysis")) { # data_analysis_py_quarto, data_analysis_r_quarto, etc.
+      success <- deploy_data_analysis_quarto(project_name, project_path, current_ext_port, project_type)
+      if (success) current_ext_port <- current_ext_port + 1
+    } else if (project_type == "ml_dl_app") {
+      success <- deploy_ml_dl_app(project_name, project_path, current_ext_port, current_int_port)
+      if (success) {
+        current_ext_port <- current_ext_port + 1
+        current_int_port <- current_int_port + 1 # 为下一个 ML 应用分配新的内部端口
+      }
+    } else {
+      log_message("项目 ", project_name, " 类型 '", project_type, "' 未知或不支持部署, 跳过.", level = "WARN")
+      next # 跳到下一个项目
+    }
+    
+    if (success) {
+      log_message("项目 ", project_name, " 部署操作初步成功.")
+      needs_nginx_reload <- TRUE
+      deployed_projects_count <- deployed_projects_count + 1
+    } else {
+      log_message("项目 ", project_name, " 部署失败.", level = "ERROR")
+    }
+  } # 结束项目循环
+  
+  if (needs_nginx_reload) {
+    log_message("\n--- 所有项目处理完毕, 尝试重新加载 Nginx ---")
+    reload_nginx()
+  } else {
+    log_message("\n--- 所有项目处理完毕, 无需重新加载 Nginx ---")
+  }
+  
+  log_message(paste0("--- 批量部署任务结束. 成功部署/配置 ", deployed_projects_count, " 个项目. ---"))
+  log_message("详情请查看日志文件: ", LOG_FILE)
+}
+
+# --- 5. 执行主函数 ---
+# main_deployment_script() # 取消注释以运行
+
+```
+
+---
+
+## 如何使用和进一步完善
+
+1.  **配置**：
+    * 仔细检查并修改 `1. 全局配置` 部分中的所有路径和设置，使其符合您的服务器环境。
+    * **`GITHUB_TOKEN`**: 创建一个具有 `repo` 范围的 GitHub Personal Access Token (PAT)，并将其设置为环境变量 `GITHUB_PAT`。
+    * **`sudo`**: 脚本中所有调用 `execute_command` 时 `sudo = TRUE` 的地方，都需要确保运行脚本的用户能够无密码执行这些特定的 `sudo` 命令，或者您需要手动介入。**这是一个重要的安全考虑。** 更安全的方式是让 R 脚本生成需要 `sudo` 的命令列表，然后由管理员手动审查并执行。
+    * **端口**：确保您选择的起始端口 (`NEXT_AVAILABLE_EXT_PORT`, `NEXT_AVAILABLE_INT_PORT`) 是可用的，并且服务器防火墙允许访问这些外部端口。
+
+2.  **软件依赖**：
+    * 在服务器上安装所有必要的软件: `R`, `git`, `nginx`, `python3-venv` (或对应系统的包), `quarto` CLI。
+    * 安装 R 包: `gh`, `stringr`, `purrr`, `glue`, `processx`。
+
+3.  **项目约定**：
+    * **类型检测**：`detect_project_type` 函数中的启发式规则可能不够准确。考虑在每个仓库中添加一个 `.project_type` 文件，内容为 `static`, `data_analysis_py_quarto`, `data_analysis_r_quarto`, 或 `ml_dl_app` 等。
+    * **Python 依赖**: 确保 Python 项目有 `requirements.txt`。
+    * **R 依赖**: 鼓励 R 项目使用 `renv` 并提交 `renv.lock`。
+    * **ML/DL 应用启动**: 这是最不标准化的部分。您可能需要：
+        * 约定一个 `run_app.sh` 脚本，该脚本负责激活虚拟环境并以正确的方式（例如 `gunicorn app:app -b 0.0.0.0:$PORT`）启动应用。脚本需要从环境变量或参数中获取监听端口。
+        * 或者，修改 `deploy_ml_dl_app` 函数以适应您项目的特定启动命令。
+        * **强烈推荐**：为每个 ML/DL 应用创建 `systemd` 服务单元文件。R 脚本可以生成这些 `.service` 文件，然后使用 `sudo systemctl enable --now <service_name>` 来启动和管理它们。这比后台运行脚本要健壮得多。
+
+4.  **Nginx**：
+    * 确保 Nginx 配置目录 (`NGINX_SITES_AVAILABLE`, `NGINX_SITES_ENABLED`) 正确。
+    * Nginx 日志路径 (`/var/log/nginx/`) 需要 Nginx 进程有权写入。
+
+5.  **安全性与错误处理**：
+    * 当前的错误处理比较基础。您需要根据实际情况进行增强。
+    * **执行来自 GitHub 的代码**：再次强调，这有潜在风险。
+    * `execute_command` 函数尝试捕获标准输出和错误，这对于调试非常重要。
+
+6.  **运行脚本**：
+    * 保存为 `.R` 文件。
+    * 在 R 环境中 `source("your_script_name.R")`。
+    * 然后调用 `main_deployment_script()`。
+    * **强烈建议先在一两个测试项目上运行，并仔细检查日志和服务器状态。**
+
+7.  **幂等性**：
+    * 脚本尝试做到一定程度的幂等性（例如，如果目录已存在则 `git pull`，如果 Nginx 配置已存在则不重复创建），但对于应用进程管理（特别是 ML/DL 应用的启动），当前的简化实现可能不是幂等的。使用 `systemd` 有助于提高幂等性。
+
+---
+
+这个 R 脚本框架提供了一个起点。将其打造成一个健壮、安全的自动化部署系统将是一个持续迭代和细化的过程。祝您好运！

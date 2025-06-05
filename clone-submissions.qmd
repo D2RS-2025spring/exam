@@ -1,8 +1,6 @@
 # 克隆项目到服务器
 
 > 给我用 R 调用 gh 访问 D2RS-2025spring 组织下面的 exam 仓库中处于 closed 状态的 ISSUE。筛选 ISSUE 中具有“确认提交”标签的部分。获取 ISSUE 中指向 github 仓库的地址，并将这些仓库一次克隆到本地的 /mnt/user/D2RS-2025spring 目录下。
->
-> 好的，这是一个 R 脚本，它将执行您要求的操作。
 
 请确保您已经安装了 `gh` 和 `stringr` R 包，并且您的 GitHub 个人访问令牌 (PAT) 已经配置好，以便 `gh` 可以进行认证。通常，`gh` 会查找 `GITHUB_PAT` 环境变量。
 
@@ -19,7 +17,7 @@ clone_base_dir <- "/mnt/user/D2RS-2025spring" # 本地克隆的基础目录
 # --- 配置参数结束 ---
 ```
 
-# 创建目录
+## 创建存储目录
 
 ```{r}
 # 确保本地克隆目录存在
@@ -35,7 +33,7 @@ if (!dir.exists(clone_base_dir)) {
 }
 ```
 
-## 获取 Closed Issues
+## 获取项目列表
 
 ```{r}
 cat("正在从", gh_org, "/", gh_repo, "获取 closed issues...\n")
@@ -52,7 +50,80 @@ issues <- tryCatch({
   cat("获取 issues 失败:", e$message, "\n")
   return(NULL)
 })
+```
 
+```{r}
+if (is.null(issues) || length(issues) == 0) {
+  cat("没有找到 closed issues，或者获取失败。\n")
+  unique_repo_urls <- character(0) # 初始化为空，以防后续步骤出错
+} else {
+  cat("成功获取", length(issues), "个 closed issues。\n")
+  # 筛选具有特定标签的 Issues
+  cat("正在筛选具有标签 '", target_label, "' 的 issues...\n")
+  filtered_issues <- list()
+  for (issue in issues) {
+    if (length(issue$labels) > 0) {
+      has_label <- any(sapply(issue$labels, function(label) label$name == target_label))
+      if (has_label) {
+        filtered_issues[[length(filtered_issues) + 1]] <- issue
+      }
+    }
+  }
+
+  if (length(filtered_issues) == 0) {
+    cat("没有找到具有标签 '", target_label, "' 的 issues。\n")
+    unique_repo_urls <- character(0)
+  } else {
+    cat("找到", length(filtered_issues), "个具有标签 '", target_label, "' 的 issues。\n")
+    # 提取仓库地址
+    repo_urls <- c()
+    cat("正在从 issue body 中提取 GitHub 仓库地址...\n")
+    for (issue in filtered_issues) {
+      if (!is.null(issue$body) && nzchar(issue$body)) {
+        matches <- stringr::str_extract_all(issue$body, "https?://github\\.com/([^/]+)/([^/\\s]+?)(\\.git)?(?=[\\s\\n\\r\\,\\)\\]\\!]|$|$)")
+        if (length(matches[[1]]) > 0) {
+          # 清理 URL，移除末尾可能存在的 .git
+          cleaned_urls <- sub("\\.git$", "", matches[[1]])
+          repo_urls <- c(repo_urls, cleaned_urls)
+        }
+      }
+    }
+
+    # 去重
+    unique_repo_urls <- unique(repo_urls)
+  }
+}
+
+```
+
+
+```{r}
+if (length(unique_repo_urls) > 0) {
+  cat("\n正在准备仓库信息并保存到磁盘...\n")
+  
+  repo_data <- data.frame(
+    name = character(length(unique_repo_urls)),
+    url = character(length(unique_repo_urls)),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in seq_along(unique_repo_urls)) {
+    repo_url <- unique_repo_urls[i]
+    # 从 URL 中提取仓库名 (不含 .git)
+    repo_name <- basename(repo_url) 
+    repo_data$name[i] <- repo_name
+    repo_data$url[i] <- repo_url # 保存原始的、去除了 .git 的 URL
+  }
+  
+  # 保存到 CSV 文件
+  repo_info_file = "submissions.csv"
+  write.csv(repo_data, repo_info_file, row.names = FALSE, quote = TRUE)
+  cat("仓库信息已成功保存到:", repo_info_file, "\n")
+
+}
+```
+
+```{r}
 if (is.null(issues) || length(issues) == 0) {
   cat("没有找到 closed issues，或者获取失败。\n")
 } else {

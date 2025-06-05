@@ -35,6 +35,8 @@ if (!dir.exists(clone_base_dir)) {
 
 ## 获取项目列表
 
+从 GitHub 上获取指定组织和仓库的 closed issues，并筛选出具有特定标签的 issues。
+
 ```{r}
 cat("正在从", gh_org, "/", gh_repo, "获取 closed issues...\n")
 issues <- tryCatch({
@@ -51,6 +53,8 @@ issues <- tryCatch({
   return(NULL)
 })
 ```
+
+获取指定的仓库地址。
 
 ```{r}
 if (is.null(issues) || length(issues) == 0) {
@@ -96,6 +100,7 @@ if (is.null(issues) || length(issues) == 0) {
 
 ```
 
+将仓库信息保存到磁盘。
 
 ```{r}
 if (length(unique_repo_urls) > 0) {
@@ -123,124 +128,13 @@ if (length(unique_repo_urls) > 0) {
 }
 ```
 
+## 生成克隆脚本
+
 ```{r}
-if (is.null(issues) || length(issues) == 0) {
-  cat("没有找到 closed issues，或者获取失败。\n")
-} else {
-  cat("成功获取", length(issues), "个 closed issues。\n")
-  # 筛选具有特定标签的 Issues
-  cat("正在筛选具有标签 '", target_label, "' 的 issues...\n")
-  filtered_issues <- list()
-  for (issue in issues) {
-    if (length(issue$labels) > 0) {
-      has_label <- any(sapply(issue$labels, function(label) label$name == target_label))
-      if (has_label) {
-        filtered_issues[[length(filtered_issues) + 1]] <- issue
-      }
-    }
-  }
-
-  if (length(filtered_issues) == 0) {
-    cat("没有找到具有标签 '", target_label, "' 的 issues。\n")
-  } else {
-    cat("找到", length(filtered_issues), "个具有标签 '", target_label, "' 的 issues。\n")
-    # 提取仓库地址
-    repo_urls <- c()
-    cat("正在从 issue body 中提取 GitHub 仓库地址...\n")
-    for (issue in filtered_issues) {
-      if (!is.null(issue$body) && nzchar(issue$body)) {
-        # 正则表达式匹配 GitHub 仓库地址
-        # 匹配 https://github.com/username/repo_name[.git]
-        matches <- stringr::str_extract_all(issue$body, "https?://github\\.com/([^/]+)/([^/\\s]+?)(\\.git)?(?=[\\s\\n\\r]|$)")
-        if (length(matches[[1]]) > 0) {
-          repo_urls <- c(repo_urls, matches[[1]])
-        }
-      }
-    }
-
-    # 去重
-    unique_repo_urls <- unique(repo_urls)
-
-    if (length(unique_repo_urls) == 0) {
-      cat("在筛选后的 issues 中没有找到任何 GitHub 仓库地址。\n")
-    } else {
-      cat("提取到以下唯一的 GitHub 仓库地址:\n")
-      for (url in unique_repo_urls) {
-        cat("- ", url, "\n")
-      }
-      # 克隆仓库
-      cat("\n开始克隆仓库到目录:", clone_base_dir, "\n")
-      cloned_count <- 0
-      failed_clones <- c()
-
-      for (repo_url in unique_repo_urls) {
-        # 从 URL 中提取仓库名作为目标文件夹名
-        repo_name_with_git <- basename(repo_url)
-        repo_name <- sub("\\.git$", "", repo_name_with_git) # 移除 .git 后缀
-        
-        target_repo_path <- file.path(clone_base_dir, repo_name)
-
-        if (dir.exists(target_repo_path)) {
-          cat("仓库 '", repo_name, "' 已存在于 '", target_repo_path, "'，跳过克隆。\n")
-          # 可选：如果需要更新现有仓库，可以在这里添加 git pull 命令
-          # current_wd <- getwd()
-          # setwd(target_repo_path)
-          # system("git pull")
-          # setwd(current_wd)
-        } else {
-          cat("正在克隆:", repo_url, "到", target_repo_path, "...\n")
-          clone_command <- paste("git clone", shQuote(repo_url), shQuote(target_repo_path))
-          
-          # 使用 tryCatch 来捕获克隆过程中的错误
-          clone_status <- tryCatch({
-            system(clone_command, intern = FALSE, ignore.stdout = FALSE, ignore.stderr = FALSE)
-          }, warning = function(w) {
-            cat("克隆警告 (", repo_url, "): ", conditionMessage(w), "\n")
-            return(999) # 返回一个非零值表示可能有问题
-          }, error = function(e) {
-            cat("克隆失败 (", repo_url, "): ", conditionMessage(e), "\n")
-            return(1) # 返回一个非零值表示错误
-          })
-
-          if (clone_status == 0) {
-            cat("成功克隆:", repo_name, "\n")
-            cloned_count <- cloned_count + 1
-          } else {
-            cat("克隆 ", repo_name, " 失败，状态码: ", clone_status, "\n")
-            failed_clones <- c(failed_clones, repo_url)
-          }
-        }
-      }
-      cat("\n克隆操作完成。\n")
-      cat("成功克隆", cloned_count, "个新仓库。\n")
-      if (length(failed_clones) > 0) {
-        cat("以下仓库克隆失败:\n")
-        for (failed_url in failed_clones) {
-          cat("- ", failed_url, "\n")
-        }
-      }
-    }
-  }
-}
-
-cat("脚本执行完毕。\n")
+# 这一步主要是为了演示流程的完整性，实际应用中如果上一步成功，可以直接用 repo_data
+# 从磁盘读取仓库信息
+repo_data = read.csv(repo_info_file, stringsAsFactors = FALSE)
+cmds = paste("git clone", repo_data$url, file.path(clone_base_dir, repo_data$name), '--depth 1')
+writeLines(cmds, "clone.sh")
 ```
 
-使用说明：
-
-1.  **保存脚本**：将上面的代码保存为一个 `.R` 文件（例如 `clone_exam_repos.R`）。
-2.  **修改配置**：
-    *   `gh_org`：GitHub 组织名，已设为 `D2RS-2025spring`。
-    *   `gh_repo`：仓库名，已设为 `exam`。
-    *   `target_label`：要筛选的标签，已设为 `确认提交`。
-    *   `clone_base_dir`：本地克隆仓库的目标基础目录，已设为 `/mnt/user/D2RS-2025spring`。请确保您对该目录有写入权限。
-3.  **运行脚本**：在 R 环境中执行 `source("clone_exam_repos.R")`，或者在终端中通过 `Rscript clone_exam_repos.R` 运行。
-
-脚本会：
-1.  连接到 GitHub API 获取指定仓库中所有 `closed`状态的 issues。
-2.  遍历这些 issues，筛选出那些包含 `确认提交` 标签的。
-3.  从筛选出的 issues 的 `body` (正文内容) 中提取所有看起来像 GitHub 仓库地址的 URL。
-4.  对提取到的 URL 进行去重。
-5.  将每个唯一的仓库 URL 克隆到 `clone_base_dir` 下，以仓库名命名的子目录中。如果子目录已存在，则会跳过克隆（您可以取消注释并修改代码以执行 `git pull`）。
-
-请注意，正则表达式 `https?://github\\.com/([^/]+)/([^/\\s]+?)(\\.git)?(?=[\\s\\n\\r]|$)` 用于提取 GitHub 仓库链接。它会尝试匹配以 `http://github.com/` 或 `https://github.com/` 开头，后跟用户名/组织名，再跟仓库名（可选地以 `.git` 结尾）的链接。`(?=[\\s\\n\\r]|$)` 是一个正向预查，确保链接后面是空格、换行或字符串结尾，以避免匹配到更长的、非仓库 URL 的一部分。

@@ -1,0 +1,10 @@
+# 重命名项目
+
+起一个有意义的项目名称。
+
+```{r}
+data = read.csv("submissions.csv") |> 
+    dplyr::filter(name != new_name)
+paste("mv -v --", data$name, data$new_name, collapse = "\n") |> 
+  writeLines("rename.sh")
+```

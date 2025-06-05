@@ -16,7 +16,7 @@ git clone https://github.com/ha-hug/Reproducing-2024imate-zhou /mnt/user/D2RS-20
 git clone https://github.com/jung-7-beep/Echo /mnt/user/D2RS-2025spring/Echo --depth 1
 git clone https://github.com/7352Mengyuan/Huanjingsf /mnt/user/D2RS-2025spring/Huanjingsf --depth 1
 git clone https://github.com/kk11985/69_Website-construction /mnt/user/D2RS-2025spring/69_Website-construction --depth 1
-git clone https://github.com/xuexue-chen/Hulab-hazu /mnt/user/D2RS-2025spring/Hulab-hazu --depth 1
+git clone https://github.com/xuexue-chen/Hulab-hzau /mnt/user/D2RS-2025spring/Hulab-hzau --depth 1
 git clone https://github.com/Liting-shu/group51-website-construction /mnt/user/D2RS-2025spring/group51-website-construction --depth 1
 git clone https://github.com/hunie233/link /mnt/user/D2RS-2025spring/link --depth 1
 git clone https://github.com/ningcaier/huhqandliuj-lab /mnt/user/D2RS-2025spring/huhqandliuj-lab --depth 1

@@ -138,3 +138,4 @@ cmds = paste("git clone", repo_data$url, file.path(clone_base_dir, repo_data$nam
 writeLines(cmds, "clone.sh")
 ```
 
+接下来，在终端运行克隆脚本完成克隆。
